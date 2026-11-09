@@ -8,9 +8,16 @@
   4. 并发调用检测 Worker
   5. 合并静态优选域名与优选 API 端点
   6. 生成 public/data.json + public/index.html + public/nodes.txt
+  7. （可选）基于自定义优选入口订阅，交叉生成 public/{CUSTOM_NODES_FILE}
 
 配置全部来自环境变量。模板仓库约定：用户只需在仓库里配置 Secret `DOMAIN`，
 工作流会拼出检测地址；本地运行时可以直接设置 CHECK_WORKER。
+
+新增可选配置（原有行为完全不变）：
+  - CUSTOM_OPTIMAL_API : 自定义优选入口订阅链接（逗号分隔多个），
+    每行 `host:port#备注`，备注会拼进发布行的 label。
+  - CUSTOM_NODES_FILE  : 自定义节点文件名（默认 my_nodes.txt，仅文件名，不含路径）。
+    该文件为“入口 × 出口”的完整笛卡尔积，仅使用 CUSTOM_OPTIMAL_API 的入口池。
 """
 
 from __future__ import annotations
@@ -289,6 +296,10 @@ class Config:
     min_success_ratio: float
     max_residential_per_country: int
     max_datacenter_per_country: int
+    # 新增：自定义优选入口订阅（独立于原有 OPTIMAL_API / EDGE_HOSTS）
+    custom_optimal_api: str
+    # 新增：自定义节点输出文件名（仅文件名，存放于 public_dir 下）
+    custom_nodes_file: str
 
     @classmethod
     def load(cls) -> "Config":
@@ -305,6 +316,10 @@ class Config:
         edge_hosts = parse_edge_hosts(static_raw) if static_raw else []
         if not edge_hosts:
             edge_hosts = [h for h in (normalize_endpoint(x) for x in DEFAULT_EDGE_HOSTS) if h]
+
+        # 自定义节点文件名：只取 basename，避免路径穿越；空值回退默认。
+        custom_file_raw = os.environ.get("CUSTOM_NODES_FILE", "my_nodes.txt").strip() or "my_nodes.txt"
+        custom_file = os.path.basename(custom_file_raw) or "my_nodes.txt"
 
         return cls(
             vpngate_api=os.environ.get("VPNGATE_API", DEFAULT_VPNGATE_API),
@@ -323,6 +338,8 @@ class Config:
             min_success_ratio=_env_float("MIN_SUCCESS_RATIO", 0.0, minimum=0.0),
             max_residential_per_country=_env_int("MAX_RESIDENTIAL_PER_COUNTRY", 20),
             max_datacenter_per_country=_env_int("MAX_DATACENTER_PER_COUNTRY", 10),
+            custom_optimal_api=os.environ.get("CUSTOM_OPTIMAL_API", "").strip(),
+            custom_nodes_file=custom_file,
         )
 
 
@@ -746,6 +763,59 @@ def fetch_optimal_endpoints(cfg: Config, session: requests.Session) -> list[str]
     return endpoints
 
 
+def parse_custom_endpoint_line(line: str) -> tuple[str, str] | None:
+    """解析 `host:port#备注` 格式的自定义优选入口行。
+
+    返回 (归一化后的 host:port, 清理后的备注)。备注为原样保留（除 # $ 换行外）。
+    纯空行 / 非法行返回 None。
+    """
+    text = (line or "").strip()
+    if not text:
+        return None
+
+    remark = ""
+    if "#" in text:
+        endpoint_part, remark_raw = text.split("#", 1)
+        # 备注里不允许出现 # $ 换行，避免破坏最终 `入口#label$链接` 结构
+        remark = re.sub(r"[#$\r\n]", "", remark_raw).strip()
+    else:
+        endpoint_part = text
+
+    endpoint = normalize_endpoint(endpoint_part)
+    if not endpoint:
+        return None
+    return endpoint, remark
+
+
+def fetch_custom_endpoints(
+    cfg: Config, session: requests.Session
+) -> list[tuple[str, str]]:
+    """拉取 CUSTOM_OPTIMAL_API 订阅，返回 [(入口, 备注), ...]，保持订阅顺序去重。"""
+    raw = (cfg.custom_optimal_api or "").strip()
+    if not raw:
+        return []
+    results: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for url in (u.strip() for u in raw.split(",") if u.strip()):
+        try:
+            log("CUSTOM OPTIMAL API", f"请求自定义优选 API: {url}")
+            response = session.get(url, timeout=min(cfg.http_timeout, 15))
+            if response.status_code != 200:
+                log("CUSTOM OPTIMAL API", f"API 返回状态码异常: {response.status_code}")
+                continue
+            count = 0
+            for line in response.text.splitlines():
+                entry = parse_custom_endpoint_line(line)
+                if entry and entry not in seen:
+                    seen.add(entry)
+                    results.append(entry)
+                    count += 1
+            log("CUSTOM OPTIMAL API", f"成功从 API 获取到 {count} 个自定义优选入口")
+        except Exception as exc:  # noqa: BLE001
+            log("CUSTOM OPTIMAL API", f"拉取自定义优选 API 失败 ({url}): {exc}")
+    return results
+
+
 def get_combined_edge_hosts(cfg: Config, session: requests.Session) -> list[str]:
     api_endpoints = fetch_optimal_endpoints(cfg, session)
     combined: list[str] = []
@@ -825,22 +895,35 @@ def build_outputs(
     }
 
 
+def _ordered_countries(data: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """按节点数量降序、代码升序排列国家分组。"""
+    return sorted(
+        data["countries"].items(),
+        key=lambda kv: (-int(kv[1].get("count") or 0), str(kv[1].get("code") or kv[0])),
+    )
+
+
+def _sorted_country_nodes(group: dict[str, Any]) -> list[dict[str, Any]]:
+    """住宅优先、延迟升序；缺失延迟排后面。"""
+    return sorted(
+        group["nodes"],
+        key=lambda n: (
+            n.get("residential") != "residential",
+            n.get("latency_ms") is None,
+            n.get("latency_ms") or 0,
+        ),
+    )
+
+
 def build_nodes_text(data: dict[str, Any], edge_hosts: list[str], cfg: Config) -> str:
     if not edge_hosts:
         raise ConfigError("优选入口池为空，无法生成 nodes.txt")
     lines: list[str] = []
     seen_links: set[str] = set()
     index = 0
-    ordered = sorted(
-        data["countries"].items(),
-        key=lambda kv: (-int(kv[1].get("count") or 0), str(kv[1].get("code") or kv[0])),
-    )
-    for code, group in ordered:
+    for code, group in _ordered_countries(data):
         name = COUNTRY_ZH.get(code) or group.get("name") or code
-        nodes = sorted(
-            group["nodes"],
-            key=lambda n: (n.get("residential") != "residential", n.get("latency_ms") is None, n.get("latency_ms") or 0),
-        )
+        nodes = _sorted_country_nodes(group)
         residential = [n for n in nodes if n.get("residential") == "residential"]
         others = [n for n in nodes if n.get("residential") != "residential"]
         chosen = residential[: cfg.max_residential_per_country] + others[: cfg.max_datacenter_per_country]
@@ -859,6 +942,49 @@ def build_nodes_text(data: dict[str, Any], edge_hosts: list[str], cfg: Config) -
     return "\n".join(lines) + ("\n" if lines else "")
 
 
+def build_custom_nodes_text(
+    data: dict[str, Any],
+    custom_endpoints: list[tuple[str, str]],
+    cfg: Config,
+) -> str:
+    """把「自定义优选入口 × 所有成功出口」组合成完整笛卡尔积。
+
+    行格式：`{入口}#{国家}-{类型}-{序号:02d}[-{订阅备注}]${sstp链接}`
+    - 序号按国家+类型单独计数（与 nodes.txt 风格一致）。
+    - 订阅里的 `#备注` 会保留在 label 末尾；备注为空时不追加。
+    - 不做每国数量截断（用户明确要“所有符合要求的链接”）。
+    """
+    if not custom_endpoints:
+        raise ConfigError("自定义优选入口池为空，无法生成自定义节点文件")
+
+    lines: list[str] = []
+    seen_lines: set[str] = set()
+    counters: dict[str, int] = {}
+
+    for code, group in _ordered_countries(data):
+        name = COUNTRY_ZH.get(code) or group.get("name") or code
+        for node in _sorted_country_nodes(group):
+            kind_key = node.get("residential") if node.get("residential") in (
+                "residential", "datacenter", "unknown"
+            ) else "unknown"
+            kind = {"residential": "住宅", "datacenter": "机房", "unknown": "未知"}[kind_key]
+            counter_key = f"{code}-{kind_key}"
+            counters[counter_key] = counters.get(counter_key, 0) + 1
+            seq = counters[counter_key]
+            link = f"sstp://vpn:vpn@{node['host']}:{node['port']}"
+
+            for entry, remark in custom_endpoints:
+                remark_suffix = f"-{remark}" if remark else ""
+                label = sanitize_remark(f"{name}-{kind}-{seq:02d}{remark_suffix}")
+                line = f"{entry}#{label}${link}"
+                if line in seen_lines:
+                    continue
+                seen_lines.add(line)
+                lines.append(line)
+
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
 def atomic_write_text(path: str, text: str) -> None:
     directory = os.path.dirname(os.path.abspath(path))
     os.makedirs(directory, exist_ok=True)
@@ -869,8 +995,16 @@ def atomic_write_text(path: str, text: str) -> None:
 
 
 def write_outputs(
-    data: dict[str, Any], cfg: Config, edge_hosts: list[str]
-) -> tuple[str, str, str, str]:
+    data: dict[str, Any],
+    cfg: Config,
+    edge_hosts: list[str],
+    custom_endpoints: list[tuple[str, str]],
+) -> tuple[str, str, str, str, str, str]:
+    """写入 3 个原有产物 + 可选的自定义节点文件。
+
+    返回 (data_path, html_path, nodes_path, nodes_text, custom_path, custom_text)。
+    当 custom_endpoints 为空时不写自定义文件，custom_text 返回空字符串。
+    """
     os.makedirs(cfg.public_dir, exist_ok=True)
     data_path = os.path.join(cfg.public_dir, "data.json")
     html_path = os.path.join(cfg.public_dir, "index.html")
@@ -890,12 +1024,25 @@ def write_outputs(
             ".catch(e=>out.textContent='加载失败: '+e)</script></html>"
         )
     atomic_write_text(html_path, html)
+
     nodes_text = build_nodes_text(data, edge_hosts, cfg)
     atomic_write_text(nodes_path, nodes_text)
-    return data_path, html_path, nodes_path, nodes_text
+
+    custom_path = os.path.join(cfg.public_dir, cfg.custom_nodes_file)
+    custom_text = ""
+    if custom_endpoints:
+        custom_text = build_custom_nodes_text(data, custom_endpoints, cfg)
+        atomic_write_text(custom_path, custom_text)
+
+    return data_path, html_path, nodes_path, nodes_text, custom_path, custom_text
 
 
-def write_step_summary(data: dict[str, Any], nodes_count: int, cfg: Config) -> None:
+def write_step_summary(
+    data: dict[str, Any],
+    nodes_count: int,
+    cfg: Config,
+    custom_nodes_count: int = 0,
+) -> None:
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "").strip()
     if not summary_path:
         return
@@ -910,6 +1057,10 @@ def write_step_summary(data: dict[str, Any], nodes_count: int, cfg: Config) -> N
         f"| 国家/地区 | {stats['countries']} |\n",
         f"| 住宅 / 机房 / 未知 | {stats['residential_est']} / {stats['datacenter_est']} / {stats['unknown_est']} |\n",
         f"| 发布节点行数 | {nodes_count} |\n",
+    ]
+    if custom_nodes_count > 0:
+        rows.append(f"| 自定义节点行数（{cfg.custom_nodes_file}）| {custom_nodes_count} |\n")
+    rows += [
         f"| 用时 | {data['duration_s']}s |\n",
         f"| 数据源 | {data['source']} |\n",
     ]
@@ -919,6 +1070,9 @@ def write_step_summary(data: dict[str, Any], nodes_count: int, cfg: Config) -> N
         for group in top:
             rows.append(f"| {group['name']}（{group['code']}）| {group['count']} | {group['residential']} |\n")
     rows.append(f"\n订阅地址：`{cfg.nodes_url}`\n")
+    if custom_nodes_count > 0 and cfg.nodes_url.endswith("nodes.txt"):
+        custom_url = cfg.nodes_url[: -len("nodes.txt")] + cfg.custom_nodes_file
+        rows.append(f"自定义订阅地址：`{custom_url}`\n")
     with open(summary_path, "a", encoding="utf-8") as handle:
         handle.write("".join(rows))
 
@@ -936,6 +1090,10 @@ def main() -> None:
     session = make_session(pool_size=cfg.concurrency)
     log("CONFIG", f"检测地址: {cfg.worker_base.rsplit('?', 1)[0]}?sstp=***")
     log("CONFIG", f"并发 {cfg.concurrency}, 单节点超时 {cfg.check_timeout}s, 整体截止 {cfg.deadline_s}s")
+    if cfg.custom_optimal_api:
+        log("CONFIG", f"自定义优选订阅已启用 → {cfg.custom_nodes_file}")
+    else:
+        log("CONFIG", "自定义优选订阅未配置（CUSTOM_OPTIMAL_API 为空），跳过自定义文件生成")
 
     rows, source = fetch_vpngate(cfg, session)
     raw_count = len(rows)
@@ -990,14 +1148,36 @@ def main() -> None:
     )
 
     edge_hosts = get_combined_edge_hosts(cfg, session)
-    data_path, html_path, nodes_path, nodes_text = write_outputs(data, cfg, edge_hosts)
+    custom_endpoints = fetch_custom_endpoints(cfg, session)
+    if cfg.custom_optimal_api and not custom_endpoints:
+        log("CUSTOM OPTIMAL API", "未获取到任何自定义优选入口，跳过自定义节点文件生成")
+
+    data_path, html_path, nodes_path, nodes_text, custom_path, custom_text = write_outputs(
+        data, cfg, edge_hosts, custom_endpoints
+    )
     nodes_count = len([line for line in nodes_text.splitlines() if line.strip()])
     log("RESULT", f"可用节点 {data['stats']['success']}, 国家/地区 {data['stats']['countries']}, nodes.txt {nodes_count} 行")
     log("WEBSITE", f"生成 {os.path.relpath(data_path, REPO_DIR)}")
     log("WEBSITE", f"生成 {os.path.relpath(html_path, REPO_DIR)}")
     log("WEBSITE", f"生成 {os.path.relpath(nodes_path, REPO_DIR)}")
+
+    custom_count = 0
+    if custom_text:
+        custom_count = len([line for line in custom_text.splitlines() if line.strip()])
+        log(
+            "RESULT",
+            f"自定义节点 {custom_count} 行（{len(custom_endpoints)} 入口 × 出口，文件 {cfg.custom_nodes_file}）",
+        )
+        log("WEBSITE", f"生成 {os.path.relpath(custom_path, REPO_DIR)}")
+    else:
+        log("RESULT", "未生成自定义节点文件（未配置订阅或订阅无有效入口）")
+
     log("USAGE", f"把 {cfg.nodes_url} 填入 edgetunnel 后台「自定义优选 IP」")
-    write_step_summary(data, nodes_count, cfg)
+    if custom_count > 0 and cfg.nodes_url.endswith("nodes.txt"):
+        custom_url = cfg.nodes_url[: -len("nodes.txt")] + cfg.custom_nodes_file
+        log("USAGE", f"自定义订阅（{cfg.custom_nodes_file}）：{custom_url}")
+
+    write_step_summary(data, nodes_count, cfg, custom_nodes_count=custom_count)
     log("WEBSITE", "完成（GitHub Pages 部署由 workflow 执行）")
 
 
