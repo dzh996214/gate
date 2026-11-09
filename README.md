@@ -8,7 +8,10 @@
 [VPN Gate](https://dzh996214.github.io/gate/)
 
 
-[VPN Gate txt](https://dzh996214.github.io/gate/nodes.txt)
+[VPN Gate nodes.txt](https://dzh996214.github.io/gate/nodes.txt)
+
+
+[VPN Gate my_nodes.txt](https://dzh996214.github.io/gate/nodes.txt)
 
 
 [VPN Gate json](https://dzh996214.github.io/gate/node.json)
