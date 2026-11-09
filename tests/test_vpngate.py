@@ -24,6 +24,8 @@ def make_config(**overrides):
         template_html="/tmp/index.html",
         edge_hosts=("a.example.com:443", "b.example.com:443"),
         optimal_api="",
+        custom_optimal_api="",          
+        custom_nodes_file="",           
         nodes_url="https://owner.github.io/repo/nodes.txt",
         min_success_ratio=0.0,
         max_residential_per_country=20,
