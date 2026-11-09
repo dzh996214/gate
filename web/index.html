@@ -172,18 +172,17 @@
 
       function formatBeijingTime(value) {
         if (!value) return '未知';
-        var date = new Date(value);
+        var normalized = String(value).replace(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) UTC$/, '$1T$2Z');
+        var date = new Date(normalized);
         if (isNaN(date.getTime())) return value;
-        return new Intl.DateTimeFormat('zh-CN', {
-          timeZone: 'Asia/Shanghai',
-          year: 'numeric',
-          month: '2-digit',
-          day: '2-digit',
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-          hourCycle: 'h23'
-        }).format(date);
+
+        // generated_at is UTC; shift it by eight hours and format with UTC getters
+        // so the display is always UTC+8 regardless of the visitor's local timezone.
+        var beijing = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+        function pad(number) { return String(number).padStart(2, '0'); }
+        return beijing.getUTCFullYear() + '-' + pad(beijing.getUTCMonth() + 1) + '-' +
+          pad(beijing.getUTCDate()) + ' ' + pad(beijing.getUTCHours()) + ':' +
+          pad(beijing.getUTCMinutes()) + ':' + pad(beijing.getUTCSeconds()) + ' UTC+8';
       }
 
       function toast(message) {
@@ -236,7 +235,7 @@
           return statCard(it[0], it[1]);
         }).join('');
         document.getElementById('meta').textContent =
-          '最后更新（北京时间）：' + formatBeijingTime(d.generated_at) +
+          '最后更新：' + formatBeijingTime(d.generated_at) +
           '｜数据源：' + (d.source || '未知') +
           '｜Worker：' + (d.worker_host || '未知');
         document.getElementById('sub-url').textContent =
