@@ -3,15 +3,15 @@
 自动检测 [VPN Gate](https://www.vpngate.net/) 的 **SSTP(TCP)** 节点可用性，并用 Cloudflare Worker 实测出口 IP，最后把结果发布到 GitHub Pages，供 edgetunnel 之类的项目当作「自定义优选 IP / 订阅」使用。
 
 > 这是一个模板仓库：**你只需要 Fork、添加一个 Secret、手动跑一次**，不需要改代码。
+---
+
 [VPN Gate](https://dzh996214.github.io/gate/)
->
-> 
+
+
 [VPN Gate txt](https://dzh996214.github.io/gate/nodes.txt)
 
 
 [VPN Gate json](https://dzh996214.github.io/gate/node.json)
----
-
 ## 特性
 
 - 只用 VPN Gate 的 TCP 节点（VPN Gate 的 TCP 端口即 SSTP 端口），并发检测
