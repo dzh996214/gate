@@ -170,6 +170,22 @@
           .replace(/'/g, '&#39;');
       }
 
+      function formatBeijingTime(value) {
+        if (!value) return '未知';
+        var date = new Date(value);
+        if (isNaN(date.getTime())) return value;
+        return new Intl.DateTimeFormat('zh-CN', {
+          timeZone: 'Asia/Shanghai',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hourCycle: 'h23'
+        }).format(date);
+      }
+
       function toast(message) {
         var el = document.getElementById('toast');
         el.textContent = message;
@@ -220,7 +236,7 @@
           return statCard(it[0], it[1]);
         }).join('');
         document.getElementById('meta').textContent =
-          '最后更新：' + (d.generated_at || '未知') +
+          '最后更新（北京时间）：' + formatBeijingTime(d.generated_at) +
           '｜数据源：' + (d.source || '未知') +
           '｜Worker：' + (d.worker_host || '未知');
         document.getElementById('sub-url').textContent =
