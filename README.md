@@ -11,10 +11,12 @@
 [VPN Gate nodes.txt](https://dzh996214.github.io/gate/nodes.txt)
 
 
-[VPN Gate yx.txt](https://dzh996214.github.io/gate/my_nodes.txt)
+[VPN Gate yx.txt](https://dzh996214.github.io/gate/yx.txt)
 
 
-[VPN Gate my_nodes.txt](https://dzh996214.github.io/gate/yx.txt)
+[VPN Gate my_nodes.txt](https://dzh996214.github.io/gate/my_nodes.txt)
+
+
 [VPN Gate json](https://dzh996214.github.io/gate/node.json)
 ## 特性
 
