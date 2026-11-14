@@ -318,7 +318,7 @@ class Config:
             edge_hosts = [h for h in (normalize_endpoint(x) for x in DEFAULT_EDGE_HOSTS) if h]
 
         # 自定义节点文件名：只取 basename，避免路径穿越；空值回退默认。
-        custom_file_raw = os.environ.get("CUSTOM_NODES_FILE", "my_nodes.txt").strip() or "my_nodes.txt"
+        custom_file_raw = os.environ.get("CUSTOM_NODES_FILE", "yx.txt").strip() or "yx.txt"
         custom_file = os.path.basename(custom_file_raw) or "my_nodes.txt"
 
         return cls(
