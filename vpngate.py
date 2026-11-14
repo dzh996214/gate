@@ -792,6 +792,7 @@ def fetch_custom_endpoints(
 ) -> list[tuple[str, str]]:
     """拉取 CUSTOM_OPTIMAL_API 订阅，返回 [(入口, 备注), ...]，保持订阅顺序去重。"""
     raw = (cfg.custom_optimal_api or "").strip()
+    token = os.environ.get("CUSTOM_OPTIMAL_API_TOKEN", "").strip()
     if not raw:
         return []
     results: list[tuple[str, str]] = []
@@ -799,7 +800,16 @@ def fetch_custom_endpoints(
     for url in (u.strip() for u in raw.split(",") if u.strip()):
         try:
             log("CUSTOM OPTIMAL API", f"请求自定义优选 API: {url}")
-            response = session.get(url, timeout=min(cfg.http_timeout, 15))
+            headers = {
+                "Accept": "application/vnd.github.raw",
+                "Authorization": f"Bearer {token}",
+            } if token and urlsplit(url).netloc.lower() == "api.github.com" else None
+            
+            response = session.get(
+                url,  
+                headers=headers,
+                timeout=min(cfg.http_timeout, 15),
+            )
             if response.status_code != 200:
                 log("CUSTOM OPTIMAL API", f"API 返回状态码异常: {response.status_code}")
                 continue
